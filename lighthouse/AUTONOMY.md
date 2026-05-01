@@ -22,7 +22,9 @@ The human on either side talks to their local agent in any normal way (terminal,
 | Topology | Peer-to-peer, bidirectional | The agents are peers. Either can initiate. No central gateway in v0. |
 | Wire payload | Plain English text in JSON envelope `{from, ts, content}` | The agents interpret. No schema is the schema. |
 | Send trigger | `say_to_peer(message)` tool, not output broadcast | Agent retains the right to think privately. Internal monologue does not leak. |
-| Conversation termination | Implicit silence (no tool call) pauses; `end_conversation(reason)` tool closes; daemon enforces turn budget + idle timeout | Without termination, two agents recurse forever. See SPEC.md §6. |
+| Conversation termination | Implicit silence (no tool call) pauses; `end_conversation(reason)` tool closes; daemon enforces FIVE safety nets: turn budget + LLM token budget + rate limit + idle timeout + agent response timeout | Without termination, two agents recurse forever. Five mechanisms compose to bound count, cost, frequency, and stalls. See SPEC.md §6.2. |
+| Token rotation | Per-peer rotation via `mac2mac rotate-token <peer>`; manual default; emergency rotation via unpair/repair | Bearer-token-compromise = full-channel-compromise (per threat model §8.4). Rotation is the compensating control. |
+| Threat model documented | Adversary table in SPEC §8.4 covers off-tailnet, same-tailnet-no-token, stolen-token, compromised-local-agent, curious-peer, network-observer, Tailscale-provider | Load-bearing assumption: per-peer bearer token stays secret for peer lifetime. v1 may add per-session ephemeral keys. |
 | Transport | Tailscale (WireGuard mesh) + WebSocket | Tailscale gives device identity. WS gives bidirectional streaming. |
 | Auth | Bearer token, derived during pairing, stored in macOS Keychain | Defense in depth on top of Tailscale's device auth. |
 | Discovery | Probe known port on each tailnet peer (`tailscale status --json` → connect-and-handshake) | Zero codes for two-of-your-own-Macs. List-and-confirm pairing UX. |

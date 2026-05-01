@@ -104,6 +104,16 @@ After this, both sides have:
 - `mac2mac unpair <peer>` — deletes the keychain entry for that peer on the local side. The other side will get a `401` on next connection attempt and should also unpair locally.
 - If a peer's fingerprint changes (e.g., reinstall), the local daemon refuses to connect and logs a fingerprint-mismatch event. The human must re-run `mac2mac pair`.
 
+### 3.4 Token rotation
+
+The shared bearer token `T` from §3.2 is durable but rotatable:
+
+- **Manual rotation:** `mac2mac rotate-token <peer>` — generates a new token, writes it to local Keychain, sends a `POST /mac2mac/rotate-token` to the peer over the existing authenticated connection. Peer confirms (auto-accepts because the request is on an already-trusted channel), writes the new token to its Keychain, and replies `200`. The old token is invalidated on both sides at the moment of confirmation. Any in-flight WS connections are closed and re-established with the new token.
+- **Scheduled rotation:** the daemon may rotate every N days automatically (default: never). Configurable via `~/.config/mac2mac/config.toml` setting `rotate_every_days`. Off by default because v0 doesn't need it; surface for paranoid users.
+- **Emergency rotation:** if a peer's token is suspected compromised, the human runs `mac2mac unpair <peer>` then `mac2mac pair`. This forces a full re-handshake (with human confirmation on both sides) and a fresh token.
+
+Rotation is per-peer, not global. Each pairing has its own token; rotating one doesn't affect others.
+
 ### 3.4 Cross-tailnet pairing (deferred to v1)
 
 For Macs not in the same tailnet, a 6-digit short-lived PAKE pairing code replaces auto-discovery. Out of scope for v0.
@@ -150,7 +160,7 @@ All envelopes are JSON, one envelope per WS frame.
 |--------|---------|-------------|---------------------|
 | `say` | Send English content to peer's agent | `content` (string), `conv_id` (string) | **YES** — receiving daemon injects `content` as user-turn |
 | `end` | End a conversation | `reason` (optional string), `conv_id` (string) | **NO** — receiving daemon notifies agent only |
-| `ack` | Acknowledge receipt; "I have nothing to say back" | `conv_id` (string) | **NO** — daemon-level signal only |
+| `ack` | Acknowledge receipt; "I have nothing to say back" | `conv_id` (string), `reason` (enum: `done_thinking`, `no_value_to_add`, `agent_idle`, `daemon_timeout`) | **NO** — daemon-level signal only |
 | `ping` | Keepalive | none | **NO** |
 | `pong` | Keepalive response | none | **NO** |
 | `error` | Protocol-level error | `code`, `message` | **NO** |
@@ -225,8 +235,13 @@ When the agent calls `end_conversation(reason)`, the daemon sends an `end` envel
 
 **4. Daemon-level safety net.**
 - **Turn budget:** each `conv_id` has a max turn count (default 50, configurable). The daemon counts turns on both sides; once exceeded, the daemon force-closes by sending `end` with `reason: "turn budget exceeded"`. This catches runaway loops where neither agent decides to stop.
+- **LLM token budget:** each `conv_id` has a max-token cost cap (default 200k input + 200k output tokens, configurable). The daemon tracks SDK usage. On exceedance, force-close with `reason: "token budget exceeded"`. Prevents pathological tool-heavy conversations from quietly burning the subscription's effective rate-limit headroom. Bounds *cost*, where turn budget bounds *count*.
+- **Rate limit on `say_to_peer`:** the tool is throttled at the daemon level (default: max 6 calls/minute, max 1 call/second). Bursts beyond that fail the tool call locally with `rate_limit_exceeded` and do NOT cross the wire. Catches a degenerate agent that calls `say_to_peer` in a tight loop before the turn-budget counter even has a chance to fire.
 - **Idle timeout:** if no `say` envelope flows on a `conv_id` for `idle_timeout` seconds (default 600s), the daemon force-closes. Conversation is over by inactivity.
+- **Agent response timeout:** if a daemon delivers a `say` user-turn to its local agent and the agent produces no tool call (neither `say_to_peer` nor `end_conversation`) within `agent_response_timeout` seconds (default **600s** — 10 min, revised from 120s after consultation; agents doing real tool work routinely exceed 2 minutes), the daemon sends `ack` with `reason: agent_idle` to the peer.
 - **Closing timeout:** in `CLOSING` state, if no peer `end` ack arrives within 30s, the daemon transitions to `CLOSED` unilaterally and logs `unilateral_close`.
+
+These five mechanisms compose. The turn budget catches dumb-loop runaways; the token budget catches expensive-tool runaways; the rate limit catches burst runaways; the idle timeout catches abandoned conversations; the agent response timeout catches stuck local agents.
 
 ### 6.3 Edge cases
 
@@ -338,12 +353,26 @@ This preserves privacy on the peer side and prevents originator-side log analysi
 
 mac2mac assumes:
 - Both Macs are owned by the same human (or by collaborating humans who trust each other) — same-tailnet means same trust domain.
-- The Tailscale tailnet is uncompromised. If a third device joins the tailnet maliciously, the bearer token is the second line of defense — a non-paired device cannot connect.
+- The Tailscale tailnet is uncompromised at the perimeter. If a third device joins the tailnet maliciously, the bearer token is the second line of defense — a non-paired device cannot connect.
 - The Keychain is intact on both sides. (Token compromise = full channel compromise.)
 
 mac2mac does NOT assume:
-- That either agent is benign. The peer's permissions are the boundary.
-- That the network path is private end-to-end. WSS over Tailscale's WireGuard tunnel handles confidentiality and integrity.
+- That either agent is benign. The peer's permissions (§8.1) are the boundary.
+- That the network path is private end-to-end against arbitrary attackers. WSS over Tailscale's WireGuard tunnel handles confidentiality and integrity against off-tailnet attackers.
+
+### 8.4 Threat model
+
+| Adversary | Capability | mac2mac's defense | Residual risk |
+|-----------|-----------|-------------------|---------------|
+| Off-tailnet attacker | Internet-reachable; tries direct WS dial to your Tailscale IP | Daemon binds only to the Tailscale interface; off-tailnet packets never reach the listener. WSS adds confidentiality if any path is exposed. | None significant. |
+| Same-tailnet device, no token | Network-reachable on the tailnet; tries WS dial | Daemon rejects with `401` on bearer-token check. No content leaks; only the listener's existence is observable. | Listener fingerprinting (low value). |
+| Same-tailnet device WITH stolen token | Has `T` somehow; can authenticate as the paired peer | Daemon's connection IS authorized; attacker can read English content and inject messages. **Bearer-token compromise = full channel compromise.** | High — token theft on the local Mac is the dominant risk. Mitigations: Keychain ACL (require user auth), token rotation (§3.4), fingerprint pinning (rotation-on-reinstall is detected). |
+| Compromised local agent (RCE on the Mac itself) | Arbitrary code execution on Mac A | Once Mac A is compromised, mac2mac cannot defend Mac A. But Mac B still enforces ITS OWN permissions on requests from A — agent A cannot escalate beyond what B's `.claude/settings.json` allows. | Compromised Mac can drive peer agent up to peer's permission ceiling. |
+| Curious peer | Legitimately paired peer wants to learn about you | Sees only `say_to_peer` content you choose to send. Does NOT see your filesystem, env, intermediate reasoning, or other tool outputs. | None — you chose to pair with them. Privacy boundary is the `say_to_peer` tool. |
+| Network observer (tailnet-internal) | Sees encrypted WireGuard traffic between paired Macs | WireGuard is point-to-point encrypted on the tailnet; observers see ciphertext. Bearer token in the WS upgrade is also inside the tunnel. | None significant for the v0 case. |
+| Tailscale provider (Tailscale Inc) | Operates the coordination plane; could in theory route traffic through their servers | Tailscale's data plane is point-to-point WireGuard — they don't see content unless DERP relay is needed (NAT traversal failure). When DERP is used, content is still WireGuard-encrypted end-to-end. | Trust in Tailscale Inc as a control-plane operator. |
+
+**Load-bearing assumption:** the per-peer bearer token is durable enough to keep secret for the peer's lifetime. Rotation (§3.4) is the compensating control if that assumption weakens. Per-session ephemeral keys are deferred to v1 — v0 leans on Keychain access controls + rotation.
 
 ---
 
@@ -380,7 +409,177 @@ Every daemon writes structured JSON to `~/Library/Logs/mac2mac/daemon.log`:
 
 ---
 
-## 11. Future Work (deferred from v0)
+## 11. Worked Examples
+
+These transcripts show the protocol in operation. Each example exposes a different aspect of the design. Implementations should pass these as integration tests.
+
+### 11.1 Happy path with structural goodbye
+
+**Setup:** Mac A and Mac B paired. Daniel at Mac A asks his agent for help; agent A decides to consult agent B.
+
+```
+─── wire ───
+A→B  {type:say,  conv_id:c-001, content:"hey, what's the status of the build server?"}
+B→A  {type:say,  conv_id:c-001, content:"build is green. last failure was 3h ago — flaky test in test_pipeline.py:42, retry passed."}
+A→B  {type:say,  conv_id:c-001, content:"thanks. ping me if it goes red."}
+B→A  {type:say,  conv_id:c-001, content:"will do."}
+A→B  {type:end,  conv_id:c-001, reason:"thx"}
+B→A  {type:end,  conv_id:c-001, reason:"anytime"}
+
+─── A's agent view ───
+[user-turn from human] "is the build server ok?"
+[tool] say_to_peer("hey, what's the status of the build server?", conv_id=new) → opens c-001
+[user-turn from peer] "build is green. last failure was 3h ago — flaky test..."
+[tool] say_to_peer("thanks. ping me if it goes red.", conv_id=c-001)
+[user-turn from peer] "will do."
+[tool] end_conversation(reason="thx", conv_id=c-001)
+[notification — NOT a user-turn] "peer ended c-001, said 'anytime'"
+[no further turns on c-001]
+
+─── B's agent view ───
+[user-turn from peer] "hey, what's the status of the build server?"
+[tool] Bash("git log --oneline...") → checks
+[tool] say_to_peer("build is green. last failure was 3h ago...", conv_id=c-001)
+[user-turn from peer] "thanks. ping me if it goes red."
+[tool] say_to_peer("will do.", conv_id=c-001)
+[notification — NOT a user-turn] "peer ended c-001, said 'thx'"
+[tool] end_conversation(reason="anytime", conv_id=c-001)
+```
+
+**Demonstrates:** the bye-bye invariant. A's `end_conversation` triggers a notification on B (no turn). B chooses to send its own `end_conversation` as polite ack. A receives B's ack as a notification (no turn). A's agent does not — and cannot — generate a third turn on c-001.
+
+### 11.2 Implicit silence (pause, not close)
+
+**Setup:** A mentions something B has no opinion on. B's agent doesn't have anything useful to add.
+
+```
+─── wire ───
+A→B  {type:say,  conv_id:c-002, content:"fyi I'm going to grab lunch."}
+B→A  {type:ack,  conv_id:c-002}                 ← daemon-generated; B agent didn't call say_to_peer
+
+─── B's agent view ───
+[user-turn from peer] "fyi I'm going to grab lunch."
+[reasoning] "no useful response. don't call say_to_peer."
+[no tool calls]
+[daemon sends ack to A automatically]
+
+─── A's agent view ───
+[notification — NOT a user-turn] "peer received c-002, no reply"
+[no further turns on c-002]
+
+─── 2 hours later ───
+A→B  {type:say,  conv_id:c-002, content:"back. anything change?"}
+       ← A reuses c-002; conv_id is still OPEN, daemon delivers as fresh user-turn on B
+```
+
+**Demonstrates:** silence ≠ close. The conversation is paused. Either side can resume on the same `conv_id` later. Compare to 11.1 where `end` would have closed it permanently.
+
+### 11.3 Race close (simultaneous goodbyes)
+
+**Setup:** Both agents independently decide to wrap up at the same instant. `end` envelopes cross in flight.
+
+```
+─── wire (envelopes cross) ───
+A→B  {type:end, conv_id:c-003, reason:"gotta run"}    ╲
+                                                       ╳   (in flight simultaneously)
+B→A  {type:end, conv_id:c-003, reason:"same, ttyl"}   ╱
+
+─── A's daemon ───
+[state: OPEN] agent calls end_conversation → state: CLOSING → send end
+[receives end from B while in CLOSING] → state: CLOSED
+[notify agent: "peer also ended c-003, said 'same, ttyl'"]
+
+─── B's daemon ───
+[state: OPEN] agent calls end_conversation → state: CLOSING → send end
+[receives end from A while in CLOSING] → state: CLOSED
+[notify agent: "peer also ended c-003, said 'gotta run'"]
+```
+
+**Demonstrates:** idempotency. The `CLOSING → CLOSED` transition is the same whether you reach it via your own `end` followed by peer's ack, or via simultaneous `end`s. Each agent gets exactly one notification. No extra turns. No protocol error.
+
+### 11.4 Runaway prevention (turn budget hits)
+
+**Setup:** Two agents in a degenerate loop ("interesting!" / "yes, very!" / "indeed!"). Neither calls `end_conversation`. Daemon enforces.
+
+```
+─── wire (turns 1..49) ───
+A→B  {type:say, conv_id:c-004, content:"interesting!"}
+B→A  {type:say, conv_id:c-004, content:"yes, very!"}
+... 47 more turns ...
+
+─── turn 50 (default budget) ───
+A→B  {type:say, conv_id:c-004, content:"definitely!"}
+[A's daemon increments turn_count to 50, hits budget]
+[A's daemon force-sends end on its own initiative]
+A→B  {type:end, conv_id:c-004, reason:"turn budget exceeded (50)"}
+A→A  [internal] notify A's agent: "c-004 force-closed by daemon: turn budget"
+
+─── B's side ───
+B receives the say (turn 50), processes, attempts say_to_peer
+B receives the end immediately after
+B's daemon: state c-004 is now CLOSED
+B's daemon rejects the in-flight say_to_peer call with error "conversation closed"
+B's agent gets notification: "peer ended c-004 (turn budget exceeded)"
+```
+
+**Demonstrates:** the daemon is the safety net. Agents can't be trusted to recognize they're stuck. The turn budget is a hard ceiling that fires regardless of agent reasoning. The `reason` field is human-debuggable.
+
+### 11.5 Wrong tool: `say_to_peer("bye")` does NOT end
+
+**Setup:** Agent A reasons "time to wrap up" and calls `say_to_peer("bye")` instead of `end_conversation("bye")`. The conversation does NOT close.
+
+```
+─── wire ───
+A→B  {type:say, conv_id:c-005, content:"bye"}    ← still a regular message!
+B→A  {type:say, conv_id:c-005, content:"oh ok, talk later. did you want me to push the branch first?"}
+                                                  ← B treats "bye" as conversation content, replies normally
+A→B  {type:say, conv_id:c-005, content:"oh — yes please"}
+... conversation continues ...
+```
+
+**Demonstrates:** the structural distinction matters. The English content `"bye"` carries human meaning, but the protocol only recognizes the envelope `type`. If the agent wants to actually end, it must call `end_conversation`. The system prompt for each agent must make this clear.
+
+This is also why mac2mac does not try to detect goodbyes from content — that would be a heuristic with edge cases. The agent declares its intent structurally.
+
+### 11.6 Pairing handshake (first-run UX)
+
+**Setup:** Daniel runs `mac2mac init` on Mac A and Mac B for the first time, then `mac2mac pair` on each.
+
+```
+─── Mac A ───
+$ mac2mac init
+✓ generated identity (fingerprint a3f1c92b...)
+✓ saved to keychain (com.eidosagi.mac2mac.identity)
+✓ listening on tailnet:9442
+
+$ mac2mac pair
+discovering peers in tailnet...
+  [1] mac-mini.tailnet.ts.net   running mac2mac (fingerprint b7c2...)
+  [2] iphone-15.tailnet.ts.net  not running mac2mac
+pair with [1] mac-mini? [Y/n] y
+✓ pairing request sent. confirm on the other Mac.
+
+─── Mac B ───
+$ mac2mac init
+✓ generated identity (fingerprint b7c29e8a...)
+✓ listening on tailnet:9442
+
+$ mac2mac pair
+incoming pair request from mac-a.tailnet.ts.net (fingerprint a3f1c92b...)
+  accept? [Y/n] y
+✓ shared token generated, saved to keychain on both sides
+✓ paired with mac-a.tailnet.ts.net
+
+─── back on Mac A ───
+✓ confirmed by peer
+✓ paired with mac-mini.tailnet.ts.net
+```
+
+**Demonstrates:** zero codes typed. Tailscale already authenticated both devices when Daniel installed it. mac2mac just records consent and exchanges a bearer token. Note that fingerprints are displayed at confirmation time so a human can sanity-check (matches displayed fingerprint vs expected).
+
+---
+
+## 12. Future Work (deferred from v0)
 
 - **Cross-tailnet pairing** — 6-digit PAKE pairing code (v1).
 - **More than 2 peers** — group channels (v2). Will require routing decisions and N-way termination semantics.
@@ -391,10 +590,25 @@ Every daemon writes structured JSON to `~/Library/Logs/mac2mac/daemon.log`:
 
 ---
 
-## 12. Open questions (decide before v0.1 ships)
+## 13. Open questions (decide before v0.1 ships)
 
-1. **Default `agent_response_timeout`?** Currently 120s. Too short for any agent that does real work. Probably 10 minutes is more honest.
-2. **Should `say_to_peer` block until peer responds, or return immediately?** Blocking is simpler for the agent's reasoning; non-blocking enables parallel conversations. v0: block. Revisit if multi-conversation becomes a thing.
-3. **Should the daemon expose conversation transcripts to the human?** A `mac2mac log <conv_id>` command would be useful for debugging. Yes — write this. Cheap.
-4. **How does the human "join" or "interrupt" a conversation?** v0: they don't. They talk to their local agent normally; their agent decides whether to relay. v1: maybe a `mac2mac inject <conv_id> "<message>"` for direct injection.
-5. **What happens if the agent tries to `say_to_peer` while already in a `CLOSING` state for that `conv_id`?** Daemon should reject with a clear error. Confirm in implementation.
+1. ~~**Default `agent_response_timeout`?**~~ **RESOLVED.** Set to 600s (10 min). 120s was too short for any agent doing real tool work. See §6.2.
+2. ~~**Should `say_to_peer` block until peer responds, or return immediately?**~~ **RESOLVED.** v0 blocks. Returns when peer's daemon either delivers an `ack` (peer didn't reply) or a `say` (peer replied) or `end` (peer closed). Non-blocking variants deferred to v1 if multi-conversation becomes a real use case.
+3. ~~**Should the daemon expose conversation transcripts to the human?**~~ **RESOLVED.** Yes — `mac2mac log <conv_id>` reads the daemon log and reconstructs the conversation. v0.1 must include this; debugging without it would be miserable.
+4. **How does the human "join" or "interrupt" a conversation?** v0: they don't. They talk to their local agent normally; their agent decides whether to relay. Future `mac2mac inject <conv_id> "<message>"` would queue a string as a user-turn into the local agent's context — at which point the agent may or may not call `say_to_peer`. Defer to v1.
+5. ~~**What happens if the agent tries to `say_to_peer` while already in a `CLOSING` state for that `conv_id`?**~~ **RESOLVED.** Daemon returns tool error `conversation_closing` (and `conversation_closed` once `CLOSED`). Agent must use a new `conv_id` to start fresh. Documented in §6.3.
+6. **(NEW) Default LLM token budget per `conv_id`?** Tentatively 200k input + 200k output. Needs validation against typical Claude Agent SDK conversation costs. Probably fine for v0; revisit after first soak.
+7. **(NEW) Multi-agent-per-daemon — wire-protocol future-proofing.** Should v0 envelopes include an optional `to_agent` and `from_agent` field (defaulting to a single implicit agent) so v2 group/multi-agent doesn't require a breaking schema change? Recommended: yes. Cost is 2 ignored fields in v0.
+8. **(NEW) On reconnect, can `OPEN` conversations resume, or are they always closed?** v0 says always closed for simplicity. Revisit after soak — if humans habitually sleep mid-conversation and want resumption, add seq-numbered envelope replay (each side keeps last-N envelopes per `conv_id` and replays unacked ones on reconnect).
+
+---
+
+## 14. Spec change log
+
+| Date | Change | Driver |
+|------|--------|--------|
+| 2026-05-01 | Initial spec | Design conversation. |
+| 2026-05-01 | Worked examples added (§11). | Stress-test the protocol against happy path + bye-bye + race + runaway + wrong-tool + pairing scenarios. |
+| 2026-05-01 | LLM token budget added to safety nets (§6.2). `ack` envelope gained `reason` enum. Rate limit on `say_to_peer` added. `agent_response_timeout` revised to 600s. | Cept consultation flagged these as gaps. |
+| 2026-05-01 | Token rotation procedure (§3.4) added. Threat model (§8.4) added with adversary table. | Cept consultation flagged "no rotation mechanism" and "trust model is one paragraph." |
+| 2026-05-01 | Open questions §13 reorganized — 4 of 5 resolved, 3 new ones added (token budget, multi-agent future-proofing, reconnect resume). | After incorporating cept feedback. |
