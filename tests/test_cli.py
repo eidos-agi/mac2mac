@@ -17,13 +17,13 @@ def _run_cli(*args: str) -> str:
 
 
 def test_cli_send_matches_core() -> None:
-    cli_out = _run_cli("send", "hello from cli")
+    cli_out = _run_cli("send", "hello from cli", "--quiet")
     core_out = core.say_to_peer("hello from cli")
     assert cli_out == core_out
 
 
 def test_cli_send_with_to_self() -> None:
-    cli_out = _run_cli("send", "ping", "--to", "self")
+    cli_out = _run_cli("send", "ping", "--to", "self", "--quiet")
     assert "you said: ping" in cli_out
 
 
