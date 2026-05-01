@@ -1,18 +1,19 @@
-"""mac2mac MCP server.
+"""mac2mac MCP server — thin shell over `mac2mac.core`.
 
-Loaded by Claude Code on each Mac. Exposes `say_to_peer` and `end_conversation`
-tools so the local agent (Claude Code) can talk to a peer Mac's agent (also
-Claude Code) over a transport-agnostic wire.
-
-v0.0.2 — minimum viable shape. say_to_peer is a local echo. No wire layer yet.
-The wire layer (Tailscale TCP, Slack, etc.) is added in subsequent commits.
+Loaded by Claude Code on each Mac. Exposes `say_to_peer`, `end_conversation`,
+and `list_peers` as MCP tools. All real logic lives in `mac2mac.core`; this
+module only translates between MCP's typed tool API and core's plain functions.
 """
+
+from __future__ import annotations
 
 import asyncio
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+
+from mac2mac import core
 
 server: Server = Server("mac2mac")
 
@@ -39,17 +40,17 @@ async def list_tools() -> list[Tool]:
                     "peer": {
                         "type": "string",
                         "description": (
-                            "Peer identifier. v0 supports 'self' for loopback "
-                            "testing; future: 'mac://hostname.tailnet.ts.net' "
-                            "or 'slack://#channel'."
+                            "Peer identifier. v0 supports 'self' for loopback; "
+                            "future: 'mac://hostname.tailnet.ts.net' or "
+                            "'slack://#channel'."
                         ),
                         "default": "self",
                     },
                     "conv_id": {
                         "type": "string",
                         "description": (
-                            "Conversation ID. Omit to start a new conversation; "
-                            "pass an existing one to continue."
+                            "Conversation ID. Omit to start new; pass existing "
+                            "to continue."
                         ),
                     },
                 },
@@ -60,31 +61,21 @@ async def list_tools() -> list[Tool]:
             name="end_conversation",
             description=(
                 "Structurally end a conversation with a peer. The peer's agent "
-                "is notified but is NOT prompted to reply (does not become a "
-                "user-turn on the receiving side). Use this — not "
+                "is notified but is NOT prompted to reply. Use this — not "
                 "say_to_peer('bye') — when you actually want to end."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "conv_id": {
-                        "type": "string",
-                        "description": "The conversation to close.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional human-readable parting message.",
-                    },
+                    "conv_id": {"type": "string"},
+                    "reason": {"type": "string"},
                 },
                 "required": ["conv_id"],
             },
         ),
         Tool(
             name="list_peers",
-            description=(
-                "List configured peers and their reachability. "
-                "v0: returns 'self' as the only peer."
-            ),
+            description="List configured peers and their reachability.",
             inputSchema={"type": "object", "properties": {}},
         ),
     ]
@@ -93,30 +84,23 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "say_to_peer":
-        message = arguments["message"]
-        peer = arguments.get("peer", "self")
-        if peer != "self":
-            return [
-                TextContent(
-                    type="text",
-                    text=f"error: peer '{peer}' not implemented in v0.0.2. only 'self' loopback works.",
-                )
-            ]
-        reply = f"[mac2mac echo via self-loop] you said: {message}"
-        return [TextContent(type="text", text=reply)]
+        text = core.say_to_peer(
+            message=arguments["message"],
+            peer=arguments.get("peer", "self"),
+            conv_id=arguments.get("conv_id"),
+        )
+        return [TextContent(type="text", text=text)]
 
     if name == "end_conversation":
-        conv_id = arguments["conv_id"]
-        reason = arguments.get("reason", "")
-        return [
-            TextContent(
-                type="text",
-                text=f"conversation {conv_id} closed (reason: {reason!r}). peer notified.",
-            )
-        ]
+        text = core.end_conversation(
+            conv_id=arguments["conv_id"],
+            reason=arguments.get("reason", ""),
+        )
+        return [TextContent(type="text", text=text)]
 
     if name == "list_peers":
-        return [TextContent(type="text", text="self (loopback, v0.0.2 echo)")]
+        text = "\n".join(core.list_peers())
+        return [TextContent(type="text", text=text)]
 
     raise ValueError(f"unknown tool: {name}")
 
