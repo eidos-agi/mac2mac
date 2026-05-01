@@ -2,53 +2,67 @@
 
 Settled design picks for the v0 build. Lighthouse reads this on every tick. Drift from these without explicit re-decision is failure.
 
-## Goal
-A CLI that lets one Mac dispatch a task to another Mac via Claude Agent SDK and stream the result back.
+## What it is
 
-```
-mac2mac --target=worker "build the project and report any test failures"
-```
+A **persistent agent-to-agent channel** between two Macs. Each Mac runs a `claude-agent-sdk` daemon. The daemons connect over a secure channel and **speak English to each other** — no RPC schema, no command syntax. The wire payload is plain text. From each agent's POV, the other Mac just looks like an unusually interesting human user.
+
+The human on either side talks to their local agent in any normal way (terminal, slack, etc.). The local agent decides when it's worth saying something across the wire — by calling a `say_to_peer` tool. Output of `say_to_peer` becomes a user-turn on the other Mac's agent. Repeat.
+
+## Not what it is
+
+- Not a CLI for one-shot remote command execution.
+- Not a controller/worker dispatcher.
+- Not RPC with typed payloads.
+- Not a streaming-output relay.
 
 ## v0 Scope (settled)
 
 | Decision | Pick | Why |
 |----------|------|-----|
-| Direction | One-way: controller → worker | Bidirectional is symmetry without a real use case yet. Add later if reverse-initiation matters. |
-| Transport | Tailscale (WireGuard mesh) + WebSocket | Tailscale gives device identity for free; WS gives bidirectional streaming. |
-| Auth | Bearer token over WS, on top of Tailscale | Tailscale authenticates the *device*, token authenticates the *request*. If a tailnet device is compromised, the worker still rejects without the token. Defense in depth. |
-| Token storage | macOS Keychain (`security` CLI) | Don't write tokens to disk in plaintext. |
-| Receiver tool scope | Full tool use, scoped by **receiver's** `.claude/settings.json` permissions | Sender does NOT override receiver permissions. The worker Mac decides what's allowed on its own machine. |
+| Topology | Peer-to-peer, bidirectional | The agents are peers. Either can initiate. No central gateway in v0. |
+| Wire payload | Plain English text in JSON envelope `{from, ts, content}` | The agents interpret. No schema is the schema. |
+| Send trigger | `say_to_peer(message)` tool, not output broadcast | Agent retains the right to think privately. Internal monologue does not leak. |
+| Conversation termination | Implicit silence (no tool call) pauses; `end_conversation(reason)` tool closes; daemon enforces turn budget + idle timeout | Without termination, two agents recurse forever. See SPEC.md §6. |
+| Transport | Tailscale (WireGuard mesh) + WebSocket | Tailscale gives device identity. WS gives bidirectional streaming. |
+| Auth | Bearer token, derived during pairing, stored in macOS Keychain | Defense in depth on top of Tailscale's device auth. |
+| Discovery | Probe known port on each tailnet peer (`tailscale status --json` → connect-and-handshake) | Zero codes for two-of-your-own-Macs. List-and-confirm pairing UX. |
+| Pairing UX (v0) | Tailscale discovery + click-to-confirm on both sides | No codes typed. Handshake happens over the already-authenticated tailnet path. |
+| Pairing UX (v1, deferred) | 6-digit short-lived code (PAKE) for cross-tailnet pairing | Add when Daniel pairs with Vybhav across tailnets, or with throwaway Macs. |
+| QR codes | Out of scope until there's a phone in the loop | Two laptops side-by-side don't benefit. |
 | SDK language | Python (`claude-agent-sdk`) | Matches Eidos stack (eidos-mail, bot-farm, slack-eidos). |
-| LLM cost model | Subscription only (`claude-agent-sdk`, never raw `anthropic` SDK) | Per global CLAUDE.md hard constraint. |
-| UX | CLI: `mac2mac --target=NAME "prompt"` | TUI is premature. Programmatic API falls out for free. |
-| Worker daemon | `launchd` LaunchAgent, auto-restart on crash | Survives reboots. Reconnects after sleep. |
-| Logging | stdout → file in `~/Library/Logs/mac2mac/`, structured JSON | Debuggable from either side. |
+| LLM cost model | Subscription only — `claude-agent-sdk`, never raw `anthropic` SDK | Per global CLAUDE.md hard constraint. |
+| Receiver tool scope | Honors the **receiver's** `.claude/settings.json` permissions, period | Sender does NOT override. Each Mac decides what's allowed on itself. |
+| Worker daemon | `launchd` LaunchAgent, auto-restart on crash, reconnect on sleep | Survives reboots and lid-close. |
+| Logging | Structured JSON to `~/Library/Logs/mac2mac/` on each Mac | Debuggable from either side. |
 
 ## Non-goals for v0
 
-- Multi-tenant / multi-user — single user, two Macs.
-- Public internet exposure — Tailscale only.
-- Automatic tool approval for destructive operations — receiver permissions handle this.
-- Bidirectional initiation — see Direction above.
+- Multi-tenant / multi-user.
+- Public internet exposure (Tailscale only; daemon refuses 0.0.0.0).
+- Cross-tailnet pairing.
 - Web UI / TUI / mobile.
+- Always-on gateway / message queue (defer until a worker Mac proves to sleep too much for P2P).
+- More than 2 peers per channel (defer; binary is the simplest case).
 
 ## Guardrails (do not violate)
 
 1. **No raw `anthropic` SDK imports** — `claude-agent-sdk` only.
-2. **No bypass of receiver's `.claude/settings.json`** — the worker honors its own permissions, period.
-3. **No token in code or env files in repo** — keychain only.
-4. **No public-internet listener** — bind to Tailscale interface only, refuse 0.0.0.0.
-5. **Streaming only** — never buffer entire responses; pipe SDK events to client as they arrive.
+2. **No bypass of receiver's `.claude/settings.json`** — the worker honors its own permissions.
+3. **No token in code or env files in repo** — Keychain only, accessed via macOS `security` CLI.
+4. **No public-internet listener** — bind to Tailscale interface only, refuse `0.0.0.0`.
+5. **No output broadcast** — only `say_to_peer` tool calls cross the wire. Local-agent thinking stays local.
+6. **No structured RPC payload** — content field is plain English. If you find yourself reaching for a JSON schema for the *content*, the design has drifted.
 
 ## Success metric
 
-- v0.1: `mac2mac --target=worker "echo hello && pwd"` returns worker's `pwd` output, bearer-token auth enforced, Tailscale-only listener verified.
-- v0.2: 24h soak — worker daemon stays up, reconnects after laptop sleep on either side.
+- v0.1: After running `mac2mac init` on Mac A, `mac2mac pair` on Mac B confirms the discovered peer, and after `mac2mac start` on both, the two agents can hold a 3-turn conversation in English. Tailscale-only listener verified. Token enforced.
+- v0.2: 24h soak — daemons stay up, reconnect after lid-close on either side.
 
 ## Re-decision triggers
 
 Update this file (and bump v) if any of these fire:
-- Need to call across non-tailnet Macs (forces real mTLS or different identity layer).
-- Multiple users on one Mac (forces per-user auth).
-- Need for receiver-initiated calls (forces bidirectional).
+- Need to pair across non-tailnet Macs (forces v1 PAKE pairing code).
+- More than 2 peers on a channel (forces routing).
+- Worker Mac proves unreliable on sleep (forces gateway).
+- Output broadcast becomes desirable (forces re-think of the say_to_peer abstraction).
 - Receiver permissions prove insufficient for sandboxing (forces sender-side allowlist).

@@ -1,0 +1,11 @@
+id: "ns_1f6921d0b5a0"
+project_id: "101517e0-0570-4c2c-bf34-a706c7605bd1"
+goal: "mac2mac: a CLI that lets one Mac dispatch a task to another Mac via Claude Agent SDK and stream the result back. v0 = one-way (controller → worker), Tailscale + WebSocket + bearer token, Python SDK, receiver-side permissions scope tool use."
+metric: "First end-to-end round-trip: `mac2mac --target=worker \"echo hello && pwd\"` from Mac A returns Mac B's pwd output, with bearer-token auth enforced and no Tailscale-bypass path. Then: same call survives a 24h soak (worker daemon stays up, reconnects after sleep)."
+stop_max_iters: null
+stop_zero_delta_n: 3
+signature: "new-project-bootstrap"
+created_at: "2026-05-01T18:48:23.005619+00:00"
+closed_at: null
+outcome: null
+repo_path: "/Users/dshanklinbv/repos-eidos-agi/mac2mac"
