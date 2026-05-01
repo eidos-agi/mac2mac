@@ -2,6 +2,35 @@
 
 Settled design picks for the v0 build. Lighthouse reads this on every tick. Drift from these without explicit re-decision is failure.
 
+---
+
+## ⚑ PHASE: IMPLEMENTATION
+
+**Spec is FROZEN at commit `38b3dee` (2026-05-01).**
+
+The design phase is complete. Lighthouse iterations from this point forward MUST either:
+
+1. **Produce a code commit** that advances `docs/BUILD-PLAN.md` Phase 1–6 toward the §1 acceptance test (Daniel asks Mac A's agent to ask Mac B for its hostname; bye-bye terminates cleanly), OR
+2. **No-op and report** — write nothing, end the iteration, explicitly state that the next unit of progress is implementation work that requires a focused human-driven session.
+
+**Forbidden in this phase (without explicit human re-decision):**
+- New SPEC.md sections.
+- New worked examples.
+- Additional threat-model adversaries.
+- TROUBLESHOOTING.md, config-schema reference, or other anticipatory operational docs for code that does not yet exist.
+- Resolving "open questions" by writing more spec — open questions are now resolved by writing CODE that forces the answer.
+
+**Why this gate exists:** in iterations 1–3, the loop produced 3 design documents totaling ~1,200 lines and zero lines of code. The agent itself diagnosed the plateau in iteration 3 ("diminishing returns from here on more spec") and immediately proposed three more spec-adjacent docs. That is the spec-hypertrophy failure mode. The gate breaks the cycle by making "more docs" structurally illegal in this phase. To resume docs work, the human must explicitly flip the phase back.
+
+**To exit IMPLEMENTATION phase back to DESIGN:** the human must edit this file to remove this gate. No agent or cron may flip the phase autonomously.
+
+**Lighthouse tick contract under this gate:**
+- If the iteration produced a code commit on a Phase 1–6 file: `signal: continue`.
+- If the iteration produced a docs change anyway: `drift_category: spec-hypertrophy, signal: pivot`.
+- If the iteration no-op'd: `signal: stop` (loop should exit; manual re-engagement required).
+
+---
+
 ## What it is
 
 A **persistent agent-to-agent channel** between two Macs. Each Mac runs a `claude-agent-sdk` daemon. The daemons connect over a secure channel and **speak English to each other** — no RPC schema, no command syntax. The wire payload is plain text. From each agent's POV, the other Mac just looks like an unusually interesting human user.
