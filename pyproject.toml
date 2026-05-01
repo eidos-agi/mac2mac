@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mac2mac"
+version = "0.0.1"
+description = "Peer-to-peer agent-to-agent channel between two Macs"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mac2mac = "mac2mac.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
