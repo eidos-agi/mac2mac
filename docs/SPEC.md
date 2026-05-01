@@ -598,8 +598,10 @@ incoming pair request from mac-a.tailnet.ts.net (fingerprint a3f1c92b...)
 4. **How does the human "join" or "interrupt" a conversation?** v0: they don't. They talk to their local agent normally; their agent decides whether to relay. Future `mac2mac inject <conv_id> "<message>"` would queue a string as a user-turn into the local agent's context — at which point the agent may or may not call `say_to_peer`. Defer to v1.
 5. ~~**What happens if the agent tries to `say_to_peer` while already in a `CLOSING` state for that `conv_id`?**~~ **RESOLVED.** Daemon returns tool error `conversation_closing` (and `conversation_closed` once `CLOSED`). Agent must use a new `conv_id` to start fresh. Documented in §6.3.
 6. **(NEW) Default LLM token budget per `conv_id`?** Tentatively 200k input + 200k output. Needs validation against typical Claude Agent SDK conversation costs. Probably fine for v0; revisit after first soak.
-7. **(NEW) Multi-agent-per-daemon — wire-protocol future-proofing.** Should v0 envelopes include an optional `to_agent` and `from_agent` field (defaulting to a single implicit agent) so v2 group/multi-agent doesn't require a breaking schema change? Recommended: yes. Cost is 2 ignored fields in v0.
-8. **(NEW) On reconnect, can `OPEN` conversations resume, or are they always closed?** v0 says always closed for simplicity. Revisit after soak — if humans habitually sleep mid-conversation and want resumption, add seq-numbered envelope replay (each side keeps last-N envelopes per `conv_id` and replays unacked ones on reconnect).
+7. ~~**(NEW) Multi-agent-per-daemon — wire-protocol future-proofing.**~~ **RESOLVED (BUILD-PLAN §3.1).** Yes — v0.1 envelopes carry optional `from_agent` and `to_agent` fields, both defaulting to `"default"`. v0.1 daemons MUST set them; MUST NOT reject envelopes that omit them. Wire-format stability is cheap to design in upfront and expensive to retrofit.
+8. ~~**(NEW) On reconnect, can `OPEN` conversations resume?**~~ **RESOLVED (BUILD-PLAN §3.3).** v0.1 always closes on disconnect. No replay, no resume. Agents notified `peer disconnected`; must use a new `conv_id` to continue. Revisit in v0.2 after soak data tells us whether disconnect-loses-context is actually painful.
+
+9. **Default LLM token budget?** Tentatively 200k input + 200k output per `conv_id` (BUILD-PLAN §3.2). Validate by measuring the v0.1 soak before locking the v0.2 default.
 
 ---
 
@@ -612,3 +614,4 @@ incoming pair request from mac-a.tailnet.ts.net (fingerprint a3f1c92b...)
 | 2026-05-01 | LLM token budget added to safety nets (§6.2). `ack` envelope gained `reason` enum. Rate limit on `say_to_peer` added. `agent_response_timeout` revised to 600s. | Cept consultation flagged these as gaps. |
 | 2026-05-01 | Token rotation procedure (§3.4) added. Threat model (§8.4) added with adversary table. | Cept consultation flagged "no rotation mechanism" and "trust model is one paragraph." |
 | 2026-05-01 | Open questions §13 reorganized — 4 of 5 resolved, 3 new ones added (token budget, multi-agent future-proofing, reconnect resume). | After incorporating cept feedback. |
+| 2026-05-01 | `docs/BUILD-PLAN.md` created. Resolved: multi-agent envelope future-proofing (Q7 — yes, add now), reconnect resume (Q8 — closed on disconnect, defer resume). Token budget Q9 deferred until soak data. v0.1 surface narrowed to a single acceptance test (Daniel's hostname round-trip + bye-bye). | Driven by simplicity-and-workability north star: collapse spec to smallest buildable artifact, lock decisions before code starts. |

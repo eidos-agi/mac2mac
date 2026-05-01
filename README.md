@@ -6,7 +6,7 @@ mac2mac is a peer-to-peer agent-to-agent channel between two macOS hosts. Each h
 
 Either Mac can speak first. Either Mac can end the conversation. Neither Mac runs commands on behalf of the other — the peer's agent decides what to do, scoped by the peer's own tool permissions.
 
-**Status:** pre-implementation spec. See [`docs/SPEC.md`](docs/SPEC.md) for the full protocol and [`lighthouse/AUTONOMY.md`](lighthouse/AUTONOMY.md) for settled design decisions.
+**Status:** pre-implementation spec. See [`docs/SPEC.md`](docs/SPEC.md) for the full protocol, [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md) for the v0.1 build sequence and acceptance test, and [`lighthouse/AUTONOMY.md`](lighthouse/AUTONOMY.md) for settled design decisions.
 
 ---
 
