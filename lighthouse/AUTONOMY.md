@@ -4,9 +4,27 @@ Settled design picks for the v0 build. Lighthouse reads this on every tick. Drif
 
 ---
 
+## ⚑ ARCHITECTURE PIVOT 2026-05-01: mac2mac is an MCP, not a daemon
+
+**Track-correction:** mac2mac is an **MCP server loaded by Claude Code** on each Mac, NOT a standalone daemon running claude-agent-sdk. The agent already exists — it's Claude Code. mac2mac's job is to expose `say_to_peer` / `end_conversation` / `list_peers` tools and own the wire layer between paired Macs.
+
+When a peer message arrives, the receiving MCP spawns `claude -p "<message>"` as a subprocess to drive the agent's response (per HARD CONSTRAINTS — fixed-cost subscription tools only). The output is shipped back over the wire.
+
+**Implications for the spec:**
+- All §6 conversation-lifecycle / state-machine logic still applies — the protocol is between MCP servers.
+- §7 agent tools become MCP tools (same names, same shape, different host).
+- §3 pairing/discovery still applies — pairs MCPs, not daemons.
+- §10 failure modes mostly hold; "daemon crashed" → "Claude Code closed on peer side" (slightly different recovery).
+
+**Transport-pluggable design:** `say_to_peer(peer, message)` resolves `peer` to a transport. v0 = `mac://hostname.tailnet.ts.net` (Tailscale TCP/WS). v1 candidate = `slack://#channel` (Slack API). The protocol envelope is transport-agnostic.
+
+**Code at HEAD reflects this pivot.** Daemon.py and serve-mode CLI are gone. mcp_server.py is the entry point. Smoke test in `tests/test_mcp_smoke.py` verifies the MCP shape (tool list + echo).
+
+---
+
 ## ⚑ PHASE: IMPLEMENTATION
 
-**Spec is FROZEN at commit `38b3dee` (2026-05-01).**
+**Spec is FROZEN at commit `38b3dee` (2026-05-01) — except for the MCP pivot above, which was an explicit human re-decision and is now also frozen.**
 
 The design phase is complete. Lighthouse iterations from this point forward MUST either:
 

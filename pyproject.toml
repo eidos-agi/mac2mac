@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mac2mac"
-version = "0.0.1"
-description = "Peer-to-peer agent-to-agent channel between two Macs"
+version = "0.0.2"
+description = "Peer-to-peer agent-to-agent channel between Macs, exposed as a Claude Code MCP server"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "mcp>=1.0.0",
+]
 
 [project.scripts]
 mac2mac = "mac2mac.cli:main"
+mac2mac-mcp = "mac2mac.mcp_server:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
